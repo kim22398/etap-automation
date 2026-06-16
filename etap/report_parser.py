@@ -21,7 +21,31 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 
 def _load_raw(filepath: str | Path, sheet_name: str = 0) -> pd.DataFrame:
-    """Load a CSV or Excel file, skip blank / comment rows at the top."""
+    """
+    Load a CSV or Excel file into a raw DataFrame with no header parsing.
+
+    All values are read as strings so that the header-detection step can
+    inspect cell contents without type coercion. Blank / comment rows at the
+    top of the file (the ETAP project-info block) are preserved; they are
+    removed later by ``_find_header_row``.
+
+    Parameters
+    ----------
+    filepath : str or Path
+        Path to the .csv, .xls, or .xlsx file.
+    sheet_name : str or int
+        Sheet name or 0-based index for Excel files (default: first sheet).
+
+    Returns
+    -------
+    pd.DataFrame
+        Raw DataFrame with integer-indexed rows and columns.
+
+    Raises
+    ------
+    ValueError
+        If the file extension is not .csv, .xls, or .xlsx.
+    """
     p = Path(filepath)
     suffix = p.suffix.lower()
     if suffix in {".xlsx", ".xls"}:
@@ -34,7 +58,28 @@ def _load_raw(filepath: str | Path, sheet_name: str = 0) -> pd.DataFrame:
 
 
 def _find_header_row(df: pd.DataFrame, keywords: list[str]) -> int:
-    """Return the index of the first row containing all supplied keywords (case-insensitive)."""
+    """
+    Return the index of the first row that contains all supplied keywords.
+
+    ETAP exports prepend several rows of project metadata (project name,
+    study case, date, revision) before the actual data table. This function
+    locates the column-header row by scanning for a row whose combined text
+    contains all of the provided keywords (case-insensitive).
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Raw DataFrame loaded by ``_load_raw`` (all string values).
+    keywords : list[str]
+        Substrings that must all appear in the header row, e.g.
+        ``["bus", "kv"]`` or ``["bus", "incident"]``.
+
+    Returns
+    -------
+    int
+        Row index of the header row. Falls back to the first non-blank row
+        if no row matches all keywords, and to 0 if the DataFrame is empty.
+    """
     kw_lower = [k.lower() for k in keywords]
     for idx, row in df.iterrows():
         row_text = " ".join(str(v) for v in row.values).lower()
@@ -48,7 +93,30 @@ def _find_header_row(df: pd.DataFrame, keywords: list[str]) -> int:
 
 
 def _normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Strip whitespace and convert column names to snake_case."""
+    """
+    Normalise DataFrame column names to snake_case for consistent downstream access.
+
+    Transformations applied (in order):
+    1. Strip leading/trailing whitespace
+    2. Convert to lowercase
+    3. Remove parentheses ``(`` and ``)``
+    4. Replace ``%`` with ``pct``
+    5. Collapse one or more whitespace characters to a single underscore
+
+    This makes column matching robust against ETAP version differences where
+    the same field may be labelled ``"Bus Name"``, ``"bus_name"``, or
+    ``"Bus_Name"`` depending on the export format.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame whose columns should be normalised.
+
+    Returns
+    -------
+    pd.DataFrame
+        The same DataFrame with normalised column names (modified in-place).
+    """
     df.columns = [
         re.sub(r"\s+", "_", str(c).strip().lower().replace("(", "").replace(")", "").replace("%", "pct"))
         for c in df.columns
