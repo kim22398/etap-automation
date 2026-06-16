@@ -3,21 +3,22 @@ Arc flash incident energy and PPE category calculations.
 
 References
 ----------
-- IEEE Std 1584-2018: Guide for Performing Arc Flash Hazard Calculations
+- IEEE Std 1584-2002: Guide for Performing Arc Flash Hazard Calculations
 - NFPA 70E-2021: Standard for Electrical Safety in the Workplace
-  - Table 130.7(C)(15)(a): PPE categories for ac systems
+  - Table 130.5(G): PPE categories by incident energy
   - Annex D: Sample arc flash calculations
 
-The 2018 edition of IEEE 1584 uses a more comprehensive empirical model than
-the 2002 edition, covering a wider voltage range (208 V – 15 kV) and equipment
-configurations.  This implementation follows the IEEE 1584-2018 equations.
+This implementation follows the IEEE 1584-2002 empirical model: arcing current
+(Eq 1/2), normalized incident energy (Eq 3/4), and the arc flash boundary
+obtained by inverting the distance term.  Valid for 208 V – 15 kV systems with
+bolted fault current in the 0.7 – 106 kA range.
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -26,22 +27,30 @@ from typing import Literal
 # ---------------------------------------------------------------------------
 
 _EQUIPMENT_CONFIG: dict[str, dict] = {
-    # (typical electrode gap mm, enclosure type, distance class)
-    "switchgear":      {"gap_mm": 32,  "enclosure": "VCB",  "typical_wd_mm": 610},
-    "switchboard":     {"gap_mm": 32,  "enclosure": "VCBB", "typical_wd_mm": 455},
-    "mcc":             {"gap_mm": 25,  "enclosure": "HCB",  "typical_wd_mm": 455},
-    "cable_junction":  {"gap_mm": 13,  "enclosure": "OA",   "typical_wd_mm": 455},
-    "panel":           {"gap_mm": 25,  "enclosure": "HCB",  "typical_wd_mm": 455},
+    # gap_mm        : typical electrode gap (IEEE 1584-2002 Table 2)
+    # enclosure     : enclosure descriptor
+    # typical_wd_mm : default working distance (IEEE 1584-2002 Table 3)
+    # box_factor_k1 : K1 enclosure factor (-0.555 box, -0.792 open air)
+    # distance_x    : distance exponent x (IEEE 1584-2002 Table 4)
+    "switchgear":      {"gap_mm": 32,  "enclosure": "VCB",  "typical_wd_mm": 610, "box_factor_k1": -0.555, "distance_x": 1.473},
+    "switchboard":     {"gap_mm": 32,  "enclosure": "VCBB", "typical_wd_mm": 455, "box_factor_k1": -0.555, "distance_x": 1.473},
+    "mcc":             {"gap_mm": 25,  "enclosure": "HCB",  "typical_wd_mm": 455, "box_factor_k1": -0.555, "distance_x": 1.473},
+    "cable_junction":  {"gap_mm": 13,  "enclosure": "OA",   "typical_wd_mm": 455, "box_factor_k1": -0.792, "distance_x": 2.000},
+    "panel":           {"gap_mm": 25,  "enclosure": "HCB",  "typical_wd_mm": 455, "box_factor_k1": -0.555, "distance_x": 1.473},
 }
 
-# IEEE 1584-2018 empirical model coefficients (Table 3, VCB enclosure, 600 V class)
-# Full 2018 model requires interpolation across voltage / gap lookup tables;
-# these are the reduced-form constants for the common 480 V / VCB case.
-# For other voltage classes use the appropriate table values.
-_C1 = 0.753  # log10 scale factor
-_C2 = 0.566
-_C3 = 1.648
-_C4 = 0.084  # distance exponent contribution
+# IEEE 1584-2002 empirical model constants (normalized incident energy form).
+#   log10(Ia)  = K + 0.662*log10(Ibf) + 0.0966*V + 0.000526*G
+#                + 0.5588*V*log10(Ibf) - 0.00304*G*log10(Ibf)   (V < 1 kV)
+#   log10(En)  = K1 + K2 + 1.081*log10(Ia) + 0.0011*G
+#   E (cal/cm2)= Cf * En * (t/0.2) * (610/D)^x
+# where En is the normalized incident energy at t=0.2 s and D=610 mm.
+_K_ARC_LV = -0.153   # arcing-current intercept, V < 1 kV, box configuration
+_K2_GROUNDING = 0.0  # ungrounded / high-resistance grounded system
+_CF_LV = 1.5         # calculation factor, V <= 1 kV
+_CF_MV = 1.0         # calculation factor, V > 1 kV
+_T_REF_S = 0.2       # normalization time (s)
+_D_REF_MM = 610.0    # normalization distance (mm)
 
 
 @dataclass
@@ -120,13 +129,23 @@ class ArcFlashCalc:
         polynomial; this function approximates it.
         """
         v = self.system_voltage_kv
+        g = self._cfg["gap_mm"]
+        lg_ibf = math.log10(bolted_fault_kA)
         if v < 1.0:
-            # Low-voltage empirical equation (simplified from 1584-2018 Eq 1)
-            log_ia = 0.00402 + 0.983 * math.log10(bolted_fault_kA)
+            # IEEE 1584-2002 Eq 1 (V < 1 kV), arcing current in kA
+            log_ia = (
+                _K_ARC_LV
+                + 0.662 * lg_ibf
+                + 0.0966 * v
+                + 0.000526 * g
+                + 0.5588 * v * lg_ibf
+                - 0.00304 * g * lg_ibf
+            )
             return 10 ** log_ia
         else:
-            # Medium-voltage: arcing current is very close to bolted
-            return bolted_fault_kA * 0.95
+            # IEEE 1584-2002 Eq 2 (V >= 1 kV)
+            log_ia = 0.00402 + 0.983 * lg_ibf
+            return 10 ** log_ia
 
     def incident_energy_cal_cm2(
         self,
@@ -138,15 +157,18 @@ class ArcFlashCalc:
         """
         Calculate incident energy at working distance.
 
-        Uses the IEEE 1584-2018 simplified empirical model:
+        Uses the IEEE 1584-2002 normalized-energy empirical model:
 
-            log10(E) = C1 + C2·log10(Ia) + C3·log10(t) − C4·log10(D)
+            log10(En) = K1 + K2 + 1.081·log10(Ia) + 0.0011·G
+            E = Cf · En · (t / 0.2) · (610 / D)^x
 
         where:
-            E   = incident energy (cal/cm²)
+            En  = normalized incident energy at t=0.2 s, D=610 mm (cal/cm²)
+            E   = incident energy at the working distance (cal/cm²)
             Ia  = arcing current (kA)
-            t   = arc duration (s)
+            t   = arc duration (s)        — energy scales linearly with time
             D   = working distance (mm)
+            G   = electrode gap (mm), x = distance exponent, Cf = calc factor
 
         Parameters
         ----------
@@ -173,21 +195,19 @@ class ArcFlashCalc:
         if duration_s <= 0:
             raise ValueError("duration_s must be positive")
 
-        # Voltage correction factor (IEEE 1584-2018 §4.6)
         v_kv = self.system_voltage_kv
-        if v_kv < 1.0:
-            kv_factor = 1.0 + 0.0011 * (v_kv * 1000 - 208)   # interpolate 208–999 V
-        else:
-            kv_factor = 1.0 + 0.023 * (v_kv - 1.0)            # 1–15 kV
+        g = self._cfg["gap_mm"]
+        k1 = self._cfg["box_factor_k1"]
+        x = self._cfg["distance_x"]
+        cf = _CF_LV if v_kv <= 1.0 else _CF_MV
 
-        log_E = (
-            _C1
-            + _C2 * math.log10(arcing_fault_kA)
-            + _C3 * math.log10(duration_s)
-            - _C4 * math.log10(distance_mm)
-        )
-        # Apply voltage and enclosure correction
-        ie = (10 ** log_E) * kv_factor
+        # Normalized incident energy En (cal/cm^2) at t = 0.2 s, D = 610 mm
+        # log10(En) = K1 + K2 + 1.081*log10(Ia) + 0.0011*G
+        log_En = k1 + _K2_GROUNDING + 1.081 * math.log10(arcing_fault_kA) + 0.0011 * g
+        En = 10 ** log_En
+
+        # Scale to actual time (linear) and working distance (D^-x)
+        ie = cf * En * (duration_s / _T_REF_S) * (_D_REF_MM / distance_mm) ** x
         return ie
 
     def arcing_current_kA(self, bolted_fault_kA: float) -> float:
@@ -225,13 +245,13 @@ class ArcFlashCalc:
         """
         IE_LIMIT_CAL_CM2 = 1.2  # NFPA 70E onset of second-degree burn
         d_ref_mm = self._cfg["typical_wd_mm"]
+        x = self._cfg["distance_x"]
         if incident_energy_cal_cm2 <= 0:
             return 0.0
-        # E ∝ D^(-C4·log10 factor) → AFB = D_ref × (E/E_lim)^(1/C4)
-        # More precisely, from log_E equation: D_afb = D_ref × (E/E_lim)^(1/0.084*C4_exp)
-        # IEEE 1584-2018 uses: AFB = (IE/IE_limit)^(1/x_factor) × WD
-        # x_factor = 2 for distance exponent in simplified model
-        afb_mm = d_ref_mm * math.sqrt(incident_energy_cal_cm2 / IE_LIMIT_CAL_CM2)
+        # Incident energy varies with distance as E ∝ D^(-x). Inverting:
+        #   AFB = D_ref × (E_ref / E_limit) ^ (1/x)
+        # where E_ref is the incident energy at the reference working distance.
+        afb_mm = d_ref_mm * (incident_energy_cal_cm2 / IE_LIMIT_CAL_CM2) ** (1.0 / x)
         return afb_mm / 1000  # convert mm → m
 
     def ppe_category(self, incident_energy_cal_cm2: float) -> str:
@@ -336,7 +356,3 @@ class ArcFlashCalc:
             ppe_category=ppe,
             notes=notes,
         )
-
-
-# allow Optional import at module level without requiring full typing import
-from typing import Optional
