@@ -9,6 +9,24 @@ A professional Python toolkit for power engineers working with **ETAP** (Electri
 
 ---
 
+## Run it (main.py)
+
+A single entry point at the repo root exposes the toolkit's key calculations — no `PYTHONPATH` or imports required:
+
+```bash
+python main.py                 # run the flagship arc flash study demo
+python main.py --help          # list every subcommand
+python main.py test            # run the pytest suite
+
+# Domain calculations straight from the CLI (all flags have sensible defaults):
+python main.py arcflash --voltage-kv 0.48 --bolted-ka 25 --duration-s 0.033 --equipment mcc
+python main.py cable --load-kw 250 --voltage-kv 0.48 --length-m 120
+```
+
+`arcflash` reports incident energy, arc flash boundary, and NFPA 70E PPE category for a bus; `cable` selects the smallest NEC-compliant copper conductor that meets both ampacity and voltage-drop limits.
+
+---
+
 ## What is ETAP?
 
 **ETAP** is the industry-standard power systems analysis software used by engineers worldwide for load flow, short circuit, arc flash, motor starting, protective device coordination, and cable ampacity studies. It is widely used in oil and gas, utilities, data centres, petrochemical, mining, and industrial facilities.
